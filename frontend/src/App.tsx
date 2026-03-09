@@ -36,7 +36,7 @@ function PageFallback() {
 export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
+      <BrowserRouter basename="/court_ladder">
         <AuthProvider>
           <Suspense fallback={<PageFallback />}>
             <Routes>

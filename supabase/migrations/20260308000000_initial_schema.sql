@@ -8,7 +8,7 @@
 -- 0. 拡張・ユーティリティ
 -- ============================================================
 
--- gen_random_uuid() は Supabase で標準利用可能（pgcrypto）
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
 
 -- ============================================================
 -- 1. ENUM 型定義
@@ -73,7 +73,7 @@ CREATE TABLE tournaments (
     game_point INTEGER NOT NULL DEFAULT 21,
     public_queue_display_limit INTEGER NOT NULL DEFAULT 5 CHECK (public_queue_display_limit BETWEEN 1 AND 10),
     public_enabled BOOLEAN NOT NULL DEFAULT false,
-    public_token TEXT NOT NULL DEFAULT encode(gen_random_bytes(24), 'hex'),  -- URL 安全なランダムトークン
+    public_token TEXT NOT NULL DEFAULT encode(extensions.gen_random_bytes(24), 'hex'),  -- URL 安全なランダムトークン
     revision INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
