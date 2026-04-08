@@ -255,17 +255,20 @@ function formatPublicEntry(snapshot: Record<string, unknown> | null): { display_
 function formatPublicEntryFromRelation(entry: Record<string, unknown> | null): { display_name: string; team_color: string | null; team_name: string | null } {
   if (!entry) return { display_name: "", team_color: null, team_name: null };
 
-  const members = ((entry.entry_members || []) as { member_order: number; member: { management_name: string; grade?: string | null }[] }[])
+  const members = ((entry.entry_members || []) as { member_order: number; member: unknown }[])
     .sort((a, b) => a.member_order - b.member_order)
     .map((em) => {
-      const member = em.member[0]
-      return member?.grade ? `${member.grade}：${member.management_name}` : member.management_name
+      const member = Array.isArray(em.member) ? em.member[0] : em.member;
+      const m = member as { management_name: string; grade?: string | null } | null;
+      if (!m) return "";
+      return m.grade ? `${m.grade}：${m.management_name}` : m.management_name;
     });
 
-  const teamArr = entry.team as { team_name: string; color_code: string }[] | null;
-  const teamObj = teamArr && teamArr.length > 0 ? teamArr[0] : null;
-  const teamName = teamObj?.team_name || null;
-  const teamColor = teamObj?.color_code || null;
+  const teamRaw = entry.team;
+  const teamObj = Array.isArray(teamRaw) ? teamRaw[0] : teamRaw;
+  const t = teamObj as { team_name: string; color_code: string } | null;
+  const teamName = t?.team_name || null;
+  const teamColor = t?.color_code || null;
 
   const namesJoined = members.join("・");
   const displayName = teamName ? `${namesJoined}（${teamName}）` : namesJoined;
