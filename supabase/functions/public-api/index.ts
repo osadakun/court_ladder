@@ -80,12 +80,13 @@ async function getSnapshot(req: Request, publicToken: string): Promise<Response>
     .eq("tournament_id", tournamentId)
     .order("court_no");
 
-  // 現在対戦（スナップショットから表示名を取得）
+  // 現在対戦（スナップショットから表示名を取得）- リクエスト試合を除外
   const { data: matches } = await db
     .from("matches")
     .select("court_no, entry_a_snapshot, entry_b_snapshot")
     .eq("tournament_id", tournamentId)
-    .eq("state", "in_progress");
+    .eq("state", "in_progress")
+    .eq("match_type", "regular");
 
   const matchByCourt = new Map<number, { entry_a_snapshot: Record<string, unknown>; entry_b_snapshot: Record<string, unknown> }>();
   for (const m of matches || []) {
@@ -136,6 +137,7 @@ async function getSnapshot(req: Request, publicToken: string): Promise<Response>
 
   const res = successResponse({
     tournament: {
+      tournament_id: tournamentId,
       name: tournament.name,
       public_page_title: tournament.public_page_title,
       state: tournament.state,
@@ -168,7 +170,8 @@ async function getPublicCourts(publicToken: string): Promise<Response> {
     .from("matches")
     .select("court_no, entry_a_snapshot, entry_b_snapshot")
     .eq("tournament_id", tournament.tournament_id)
-    .eq("state", "in_progress");
+    .eq("state", "in_progress")
+    .eq("match_type", "regular");
 
   const matchByCourt = new Map<number, Record<string, unknown>>();
   for (const m of matches || []) matchByCourt.set(m.court_no, m);
@@ -207,6 +210,7 @@ async function getPublicCourtDetail(publicToken: string, courtNo: number): Promi
     .eq("tournament_id", tournament.tournament_id)
     .eq("court_no", courtNo)
     .eq("state", "in_progress")
+    .eq("match_type", "regular")
     .maybeSingle();
 
   const { data: queue } = await db

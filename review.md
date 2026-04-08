@@ -1,18 +1,39 @@
-• Findings
+# v2.7 実装計画レビュー（rev.2 再レビュー）
 
-  1. allocationApply が非トランザクションで既存待機列を先に全削除しており、挿入失敗時に大会の初期配置が全消失します。admin-courts/index.ts:507 admin-courts/index.ts:519
-     queue_items を全削除したあとで新規挿入しているため、途中失敗時の復旧手段がありません。少なくとも一括適用は DB トランザクション化が必要です。
-  2. ロールバック UI は現状成功しません。DashboardPage.tsx:60 DashboardPage.tsx:62 CourtCard.tsx:90 admin-matches/index.ts:39 admin-matches/index.ts:53 admin-matches/index.ts:439
-     フロントは /api/admin-matches/${tid}/${matchId}/rollback を叩いていますが、バックエンドは /matches/:matchId/rollback しか受けません。さらにボタン表示条件が currentMatch.state ===
-     'in_progress' で、バックエンド側のロールバック条件 finished と矛盾しています。
-  3. 履歴画面の CSV ダウンロードは、現在の Bearer トークン認証方式では 401 になります。HistoryPage.tsx:71 HistoryPage.tsx:76 admin-history/index.ts:17
-     window.open() では Authorization ヘッダを付けられませんが、admin-history は毎回 requireAdmin() を通しています。今の実装だとブラウザからの CSV エクスポートは通らないはずです。
-  4. audit_logs は参照・CSV出力だけ実装されていて、書き込みがありません。admin-history/index.ts:114 admin-history/index.ts:197
-     リポジトリ全体を見ても audit_logs への insert が無く、履歴画面の監査ログタブとその CSV は常に空になります。FR-15 と 7-3.監査ログ対象 は未達です。
-  5. CSV 取込 commit も非トランザクションで、失敗時に孤児データを残します。admin-imports/index.ts:232 admin-imports/index.ts:253 admin-imports/index.ts:277
-     members 作成後に entries が失敗した場合はメンバーだけ残り、entries 作成後に entry_members が失敗した場合はメンバーとエントリーが半端に残ります。再実行で重複も起こりえます。
+対象: `docs/superpowers/plans/2026-03-11-v27-features.md`
+基準: `spec.md` v2.7 / `adding_spec.md`
 
-  Assumptions / Questions
+前回指摘のうち、元位置復元・`court_no` 制約・リクエスト試合の削除導線・公開APIでの `match_type = 'regular'` フィルタ追加は概ね反映されています。  
+一方で、まだ実装着手前に直した方がよい点があります。
 
-  - CSV エクスポートについて、リバースプロキシ側で Authorization を注入する設計ではなく、現行のフロント実装だけで完結させる前提でレビューしています。
-  - allocationApply と CSV import commit は、Supabase RPC か SQL 関数でトランザクション化する方が安全です。
+## Findings
+
+1. **[重大] リクエスト試合の結果入力フローがまだ閉じていない**
+   - 計画書: `docs/superpowers/plans/2026-03-11-v27-features.md:807-819`, `docs/superpowers/plans/2026-03-11-v27-features.md:986-995`, `docs/superpowers/plans/2026-03-11-v27-features.md:1015-1017`
+   - 仕様: `spec.md:396-399`, `spec.md:406-408`, `spec.md:902-908`
+   - 計画ではリクエスト試合の結果入力に既存 `ResultInputDialog` を流用する前提ですが、そのために必要なタスクが不足しています。`frontend/src/types/index.ts` の `Match.court_no` は `null` を取りうるように直す必要があるのに、計画では `match_type` と元位置カラム追加しか触れていません。また、既存ダイアログは結果確定前に移動プレビューを前提にしているため、リクエスト試合や結果再入力では「移動なし」の分岐、もしくは preview API 側の明示的な対応が必要です。このままだと `court_no = null` の試合表示やプレビュー画面で詰まります。
+
+2. **[重大] `in_progress` 試合のキャンセル手順が仕様のロールバック手順とずれており、同一試合を二重に処理しうる**
+   - 計画書: `docs/superpowers/plans/2026-03-11-v27-features.md:641-716`
+   - 仕様: `spec.md:731-737`
+   - 仕様では、移動先で `in_progress` 試合に入っている場合はいったんその試合の「両エントリー」を待機列先頭へ戻し、その後に勝者・敗者を移動先待機列から除外して元コートへ戻します。計画案は `rollbackEntryId` の相手だけを待機列へ戻す形になっており、仕様の手順と一致していません。さらに、勝者・敗者が同じ `in_progress` 試合に入っているケースでは、同一試合に対して helper を 2 回呼ぶ構成に見えるため、二重キャンセルや重複挿入の危険があります。
+
+3. **[重大] D&D の対象を「待機列のエントリーのみ」に狭めており、仕様と食い違っている**
+   - 計画書: `docs/superpowers/plans/2026-03-11-v27-features.md:1047-1050`
+   - 仕様: `spec.md:752-753`, `spec.md:973`
+   - 仕様は「全エントリーのドラッグ&ドロップによるコート間移動 UI」を要求していますが、計画は `in_progress` 試合中のエントリーを明示的に移動不可にしています。既存 API の都合で制約を強めるなら、先に仕様を変える必要があります。仕様を変えない前提なら、現在対戦中エントリーも扱える API/画面設計まで計画に含めるべきです。
+
+4. **[中] 公開画面の Realtime 要件が依然として計画に落ちていない**
+   - 計画書: `docs/superpowers/plans/2026-03-11-v27-features.md:923-949`
+   - 仕様: `spec.md:830-832`
+   - 公開画面タスクはメタタグ、エラー表示、リトライ、原因調査には分解されましたが、仕様が明記している `tournaments.revision` の購読と snapshot 再取得がタスク化されていません。現行実装は 10 秒ポーリングなので、ここを計画に入れないと v2.7 の公開画面要件は未達のままです。
+
+5. **[中] 監査ログの追加方針と監査ログテスト更新が計画上つながっていない**
+   - 計画書: `docs/superpowers/plans/2026-03-11-v27-features.md:794`, `docs/superpowers/plans/2026-03-11-v27-features.md:845`, `docs/superpowers/plans/2026-03-11-v27-features.md:872`
+   - 関連テスト: `tests/core/audit-coverage.test.ts`
+   - リクエスト試合作成・削除、結果再入力で `audit_log` を書く方針は入っていますが、それに対応する `tests/core/audit-coverage.test.ts` の更新タスクがありません。既存テストは v2.6 前提の action 一覧を固定しているので、`match_reenter_result` や新規 action を増やすならテスト計画もセットで入れておいた方がよいです。
+
+## 補足
+
+- ロールバック検証手順の `4.` はまだ「元の位置(1,2)に復元」となっており、rev.2 で広げた任意位置ケースを検証観点に反映し切れていません。`3,4` や非連続位置も含めておくと計画と整合します。
+- 公開画面は API 側の `match_type` フィルタ追加まで書けているので、残りはフロント側の Realtime 導線を足せばかなり締まります。

@@ -67,13 +67,17 @@ export interface Court {
 export interface Match {
   match_id: string
   tournament_id: string
-  court_no: number
+  court_no: number | null
+  match_type: 'regular' | 'request'
   entry_a_id: string
   entry_b_id: string
   entry_a_snapshot: EntrySnapshot | null
   entry_b_snapshot: EntrySnapshot | null
+  entry_a_original_queue_position: number | null
+  entry_b_original_queue_position: number | null
   state: 'in_progress' | 'finished' | 'cancelled'
-  outcome_type: 'normal' | 'retired' | 'walkover' | null
+  cancel_reason: 'rollback' | 'manual_clear' | null
+  outcome_type: 'normal' | 'retired' | 'walkover' | 'abandoned' | null
   score_a: number | null
   score_b: number | null
   winner_entry_id: string | null

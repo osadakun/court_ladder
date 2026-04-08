@@ -6,10 +6,10 @@ import { successResponse, errorResponse, handleCors, ErrorCode } from "../_share
 import { requireAdmin } from "../_shared/auth.ts";
 import { getSupabaseClient } from "../_shared/db.ts";
 import { writeAuditLog } from "../_shared/audit.ts";
-import { canConfirmResult, canRollback, determineLoser } from "../_shared/core/match-lifecycle.ts";
+import { canConfirmResult, canReenterResult, canRollback, determineLoser } from "../_shared/core/match-lifecycle.ts";
 import { validateScore } from "../_shared/core/score-rules.ts";
 import { calculateMovements } from "../_shared/core/court-logic.ts";
-import { appendToQueueWithTeamAvoidance, canAutoGenerateMatch, pickMatchEntries } from "../_shared/core/queue-manager.ts";
+import { appendToQueueWithTeamAvoidance, canAutoGenerateMatch, pickMatchEntries, restoreToOriginalPosition } from "../_shared/core/queue-manager.ts";
 import { createEntrySnapshot } from "../_shared/core/display-name.ts";
 import type { CourtInfo, QueueEntry } from "../_shared/core/types.ts";
 
@@ -37,6 +37,17 @@ Deno.serve(async (req) => {
     return await listMatches(tournamentId, url);
   }
 
+  // POST /request-matches
+  if (req.method === "POST" && subPath === "/request-matches") {
+    return await createRequestMatch(req, tournamentId, admin.adminId);
+  }
+
+  // DELETE /request-matches/:matchId
+  const requestMatchIdMatch = subPath.match(/^\/request-matches\/([0-9a-f-]+)\/?$/);
+  if (requestMatchIdMatch && req.method === "DELETE") {
+    return await deleteRequestMatch(tournamentId, requestMatchIdMatch[1], admin.adminId);
+  }
+
   // Match /matches/:matchId/...
   const matchIdMatch = subPath.match(/^\/matches\/([0-9a-f-]+)\/?(.*)$/);
   if (matchIdMatch) {
@@ -50,6 +61,10 @@ Deno.serve(async (req) => {
     // POST /matches/:matchId/result
     if (req.method === "POST" && actionPath === "/result") {
       return await confirmResult(req, tournamentId, matchId, admin.adminId);
+    }
+    // PATCH /matches/:matchId/result
+    if (req.method === "PATCH" && actionPath === "/result") {
+      return await reenterResult(req, tournamentId, matchId, admin.adminId);
     }
     // POST /matches/:matchId/rollback
     if (req.method === "POST" && actionPath === "/rollback") {
@@ -84,6 +99,9 @@ async function listMatches(tournamentId: string, url: URL): Promise<Response> {
   const courtFilter = url.searchParams.get("court_no");
   if (courtFilter) query = query.eq("court_no", parseInt(courtFilter));
 
+  const matchTypeFilter = url.searchParams.get("match_type");
+  if (matchTypeFilter) query = query.eq("match_type", matchTypeFilter);
+
   const page = parseInt(url.searchParams.get("page") || "1");
   const pageSize = parseInt(url.searchParams.get("page_size") || "50");
   query = query.range((page - 1) * pageSize, page * pageSize - 1);
@@ -101,6 +119,7 @@ async function getCurrentMatch(tournamentId: string, courtNo: number): Promise<R
     .eq("tournament_id", tournamentId)
     .eq("court_no", courtNo)
     .eq("state", "in_progress")
+    .eq("match_type", "regular")
     .single();
 
   if (error || !data) {
@@ -152,6 +171,14 @@ async function previewResult(
   const confirmCheck = canConfirmResult({ matchState: match.state, tournamentState: tournament.state });
   if (!confirmCheck.allowed) {
     return errorResponse(confirmCheck.errorCode!, "結果確定できません。", 409);
+  }
+
+  if (match.match_type === "request") {
+    return successResponse({
+      match: { match_id: matchId, court_no: match.court_no },
+      movements: [],
+      movement_mode: "none",
+    });
   }
 
   // コート一覧を取得して移動先を計算
@@ -286,6 +313,58 @@ async function confirmResult(
     return errorResponse(ErrorCode.INVALID_SCORE, scoreResult.errors.join(', '), 422);
   }
 
+  const isAbandoned = body.outcome_type === "abandoned";
+  const winnerId = isAbandoned ? null : body.winner_entry_id!;
+  const loserId = isAbandoned ? null : determineLoser(winnerId!, match.entry_a_id, match.entry_b_id);
+
+  if (match.match_type === "request") {
+    await db
+      .from("matches")
+      .update({
+        state: "finished",
+        outcome_type: body.outcome_type,
+        score_a: body.score_a,
+        score_b: body.score_b,
+        winner_entry_id: winnerId,
+        loser_entry_id: loserId,
+        finished_at: new Date().toISOString(),
+        result_confirmed_by: adminId,
+        note: body.note || null,
+        version: match.version + 1,
+      })
+      .eq("match_id", matchId);
+
+    await writeAuditLog({
+      tournamentId,
+      adminId,
+      actionType: "match_confirm",
+      targetType: "match",
+      targetId: matchId,
+      before: match,
+      after: {
+        state: "finished",
+        match_type: "request",
+        winner_entry_id: winnerId,
+        loser_entry_id: loserId,
+        score_a: body.score_a,
+        score_b: body.score_b,
+      },
+    });
+
+    return successResponse({
+      match: {
+        match_id: matchId,
+        court_no: match.court_no,
+        state: "finished",
+        winner_entry_id: winnerId,
+        loser_entry_id: loserId,
+      },
+      movements: [],
+      movement_mode: "none",
+      affected_courts: [],
+    });
+  }
+
   // コート一覧を取得
   const { data: courts } = await db
     .from("courts")
@@ -300,9 +379,6 @@ async function confirmResult(
     courtType: c.court_type as "singles" | "doubles",
   }));
 
-  const isAbandoned = body.outcome_type === "abandoned";
-  const winnerId = isAbandoned ? null : body.winner_entry_id!;
-  const loserId = isAbandoned ? null : determineLoser(winnerId!, match.entry_a_id, match.entry_b_id);
   const movements = isAbandoned
     ? [
       { entryId: match.entry_a_id, fromCourtNo: match.court_no, toCourtNo: match.court_no, reason: "abandoned_requeue" as const },
@@ -471,6 +547,289 @@ async function confirmResult(
   }, { revision: newRevision });
 }
 
+async function createRequestMatch(
+  req: Request,
+  tournamentId: string,
+  adminId: string,
+): Promise<Response> {
+  let body: {
+    entry_a_id?: string;
+    entry_b_id?: string;
+    court_no?: number | null;
+    note?: string;
+  };
+  try {
+    body = await req.json();
+  } catch {
+    return errorResponse(ErrorCode.VALIDATION_ERROR, "リクエストボディが不正です。", 400);
+  }
+
+  if (!body.entry_a_id || !body.entry_b_id) {
+    return errorResponse(ErrorCode.VALIDATION_ERROR, "entry_a_id と entry_b_id は必須です。", 400);
+  }
+  if (body.entry_a_id === body.entry_b_id) {
+    return errorResponse(ErrorCode.VALIDATION_ERROR, "同一エントリーは指定できません。", 400);
+  }
+
+  const db = getSupabaseClient();
+  const { data: tournament } = await db
+    .from("tournaments")
+    .select("state")
+    .eq("tournament_id", tournamentId)
+    .single();
+
+  if (!tournament) return errorResponse(ErrorCode.NOT_FOUND, "大会が見つかりません。", 404);
+  if (tournament.state !== "live") {
+    return errorResponse(ErrorCode.TOURNAMENT_NOT_LIVE, "進行中の大会でのみ作成できます。", 409);
+  }
+
+  const { data: entries } = await db
+    .from("entries")
+    .select("entry_id, status")
+    .eq("tournament_id", tournamentId)
+    .in("entry_id", [body.entry_a_id, body.entry_b_id]);
+
+  if (!entries || entries.length !== 2) {
+    return errorResponse(ErrorCode.NOT_FOUND, "エントリーが見つかりません。", 404);
+  }
+  if (entries.some((entry: { status: string }) => entry.status !== "active")) {
+    return errorResponse(ErrorCode.ENTRY_NOT_ACTIVE, "active なエントリーのみ指定できます。", 409);
+  }
+
+  // いずれかのエントリーが既に in_progress 試合に参加していないかチェック
+  const { count: inProgressCount } = await db
+    .from("matches")
+    .select("*", { count: "exact", head: true })
+    .eq("tournament_id", tournamentId)
+    .eq("state", "in_progress")
+    .or(`entry_a_id.in.(${body.entry_a_id},${body.entry_b_id}),entry_b_id.in.(${body.entry_a_id},${body.entry_b_id})`);
+
+  if ((inProgressCount || 0) > 0) {
+    return errorResponse(ErrorCode.VALIDATION_ERROR, "対戦中のエントリーは指定できません。", 409);
+  }
+
+  const snapshotA = await buildEntrySnapshot(db, tournamentId, body.entry_a_id);
+  const snapshotB = await buildEntrySnapshot(db, tournamentId, body.entry_b_id);
+
+  const { data: match, error } = await db
+    .from("matches")
+    .insert({
+      tournament_id: tournamentId,
+      court_no: body.court_no ?? null,
+      match_type: "request",
+      state: "in_progress",
+      entry_a_id: body.entry_a_id,
+      entry_b_id: body.entry_b_id,
+      entry_a_snapshot: snapshotA,
+      entry_b_snapshot: snapshotB,
+      entry_a_original_queue_position: null,
+      entry_b_original_queue_position: null,
+      note: body.note ?? null,
+    })
+    .select("*")
+    .single();
+
+  if (error || !match) {
+    return errorResponse(ErrorCode.VALIDATION_ERROR, error?.message ?? "試合の作成に失敗しました。", 400);
+  }
+
+  await writeAuditLog({
+    tournamentId,
+    adminId,
+    actionType: "request_match_create",
+    targetType: "match",
+    targetId: match.match_id,
+    after: match,
+  });
+
+  return successResponse(match, undefined, 201);
+}
+
+async function deleteRequestMatch(
+  tournamentId: string,
+  matchId: string,
+  adminId: string,
+): Promise<Response> {
+  const db = getSupabaseClient();
+  const { data: match } = await db
+    .from("matches")
+    .select("*")
+    .eq("tournament_id", tournamentId)
+    .eq("match_id", matchId)
+    .single();
+
+  if (!match) return errorResponse(ErrorCode.NOT_FOUND, "試合が見つかりません。", 404);
+  if (match.match_type !== "request") {
+    return errorResponse(ErrorCode.VALIDATION_ERROR, "通常試合は削除できません。", 409);
+  }
+  if (!["in_progress", "finished"].includes(match.state)) {
+    return errorResponse(ErrorCode.VALIDATION_ERROR, "削除できない試合状態です。", 409);
+  }
+
+  const { data: tournament } = await db
+    .from("tournaments")
+    .select("state")
+    .eq("tournament_id", tournamentId)
+    .single();
+  if (tournament?.state === "ended") {
+    return errorResponse(ErrorCode.VALIDATION_ERROR, "終了した大会の試合は削除できません。", 409);
+  }
+
+  const { error } = await db
+    .from("matches")
+    .delete()
+    .eq("tournament_id", tournamentId)
+    .eq("match_id", matchId);
+
+  if (error) {
+    return errorResponse(ErrorCode.VALIDATION_ERROR, error.message, 400);
+  }
+
+  await writeAuditLog({
+    tournamentId,
+    adminId,
+    actionType: "request_match_delete",
+    targetType: "match",
+    targetId: matchId,
+    before: match,
+  });
+
+  return new Response(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, if-none-match",
+      "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
+    },
+  });
+}
+
+async function reenterResult(
+  req: Request,
+  tournamentId: string,
+  matchId: string,
+  adminId: string,
+): Promise<Response> {
+  let body: {
+    version?: number;
+    outcome_type?: string;
+    score_a?: number | null;
+    score_b?: number | null;
+    winner_entry_id?: string | null;
+    note?: string;
+  };
+  try {
+    body = await req.json();
+  } catch {
+    return errorResponse(ErrorCode.VALIDATION_ERROR, "リクエストボディが不正です。", 400);
+  }
+
+  const db = getSupabaseClient();
+  const { data: match } = await db
+    .from("matches")
+    .select("*")
+    .eq("match_id", matchId)
+    .eq("tournament_id", tournamentId)
+    .single();
+
+  if (!match) return errorResponse(ErrorCode.NOT_FOUND, "試合が見つかりません。", 404);
+  if (body.version !== undefined && body.version !== match.version) {
+    return errorResponse(ErrorCode.VERSION_CONFLICT, "試合データが更新されています。", 409);
+  }
+
+  const reenterCheck = canReenterResult({ matchState: match.state });
+  if (!reenterCheck.allowed) {
+    return errorResponse(reenterCheck.errorCode!, "結果再入力ができません。", 409);
+  }
+
+  const { data: tournament } = await db
+    .from("tournaments")
+    .select("state, game_point")
+    .eq("tournament_id", tournamentId)
+    .single();
+
+  if (!tournament) return errorResponse(ErrorCode.NOT_FOUND, "大会が見つかりません。", 404);
+  if (tournament.state === "ended") {
+    return errorResponse(ErrorCode.VALIDATION_ERROR, "終了した大会の結果は変更できません。", 409);
+  }
+
+  const scoreResult = validateScore({
+    outcomeType: body.outcome_type as "normal" | "retired" | "walkover" | "abandoned",
+    scoreA: body.score_a ?? null,
+    scoreB: body.score_b ?? null,
+    winnerEntryId: body.winner_entry_id ?? "",
+    entryAId: match.entry_a_id,
+    entryBId: match.entry_b_id,
+    gamePoint: tournament.game_point,
+  });
+
+  if (!scoreResult.valid) {
+    return errorResponse(ErrorCode.INVALID_SCORE, scoreResult.errors.join(", "), 422);
+  }
+
+  const isAbandoned = body.outcome_type === "abandoned";
+  const winnerId = isAbandoned ? null : body.winner_entry_id!;
+  const loserId = isAbandoned ? null : determineLoser(winnerId!, match.entry_a_id, match.entry_b_id);
+
+  const before = {
+    outcome_type: match.outcome_type,
+    score_a: match.score_a,
+    score_b: match.score_b,
+    winner_entry_id: match.winner_entry_id,
+    loser_entry_id: match.loser_entry_id,
+    note: match.note ?? null,
+  };
+
+  const { data: updated, error } = await db
+    .from("matches")
+    .update({
+      outcome_type: body.outcome_type,
+      score_a: body.score_a,
+      score_b: body.score_b,
+      winner_entry_id: winnerId,
+      loser_entry_id: loserId,
+      note: body.note ?? match.note ?? null,
+      version: match.version + 1,
+    })
+    .eq("match_id", matchId)
+    .eq("version", match.version)
+    .select("match_id")
+    .maybeSingle();
+
+  if (error) {
+    return errorResponse(ErrorCode.VALIDATION_ERROR, error.message, 400);
+  }
+  if (!updated) {
+    return errorResponse(ErrorCode.VERSION_CONFLICT, "試合データが更新されています。再読込してください。", 409);
+  }
+
+  await writeAuditLog({
+    tournamentId,
+    adminId,
+    actionType: "match_reenter_result",
+    targetType: "match",
+    targetId: matchId,
+    before,
+    after: {
+      outcome_type: body.outcome_type,
+      score_a: body.score_a,
+      score_b: body.score_b,
+      winner_entry_id: winnerId,
+      loser_entry_id: loserId,
+      note: body.note ?? match.note ?? null,
+    },
+  });
+
+  return successResponse({
+    match_id: matchId,
+    outcome_type: body.outcome_type,
+    score_a: body.score_a,
+    score_b: body.score_b,
+    winner_entry_id: winnerId,
+    loser_entry_id: loserId,
+  });
+}
+
 async function rollbackResult(
   req: Request,
   tournamentId: string,
@@ -514,27 +873,86 @@ async function rollbackResult(
     .eq("tournament_id", tournamentId)
     .eq("entry_id", match.loser_entry_id);
 
-  // 勝者・敗者が別試合に含まれるか確認
+  // 移動先コートを算出（eligibility チェックとキャンセルのスコープ限定に使用）
+  const { data: allCourts } = await db
+    .from("courts")
+    .select("court_no, status, current_match_id, court_type")
+    .eq("tournament_id", tournamentId)
+    .order("court_no");
+
+  const courtInfosForRollback: CourtInfo[] = (allCourts || []).map((c: { court_no: number; status: string; current_match_id: string | null; court_type: string }) => ({
+    courtNo: c.court_no,
+    status: c.status as "active" | "stopped",
+    currentMatchId: c.current_match_id,
+    courtType: c.court_type as "singles" | "doubles",
+  }));
+
+  const originalMovements = calculateMovements(match.court_no, match.winner_entry_id!, match.loser_entry_id!, courtInfosForRollback);
+  const winnerDestCourtNo = originalMovements.winnerMovement.toCourtNo;
+  const loserDestCourtNo = originalMovements.loserMovement.toCourtNo;
+
+  // 勝者・敗者が移動先コートで別の通常試合に含まれるか確認（移動先コートに限定）
   const { count: winnerMatchCount } = await db
     .from("matches")
     .select("*", { count: "exact", head: true })
     .eq("tournament_id", tournamentId)
+    .eq("court_no", winnerDestCourtNo)
     .eq("state", "in_progress")
+    .eq("match_type", "regular")
     .or(`entry_a_id.eq.${match.winner_entry_id},entry_b_id.eq.${match.winner_entry_id}`);
 
   const { count: loserMatchCount } = await db
     .from("matches")
     .select("*", { count: "exact", head: true })
     .eq("tournament_id", tournamentId)
+    .eq("court_no", loserDestCourtNo)
     .eq("state", "in_progress")
+    .eq("match_type", "regular")
+    .or(`entry_a_id.eq.${match.loser_entry_id},entry_b_id.eq.${match.loser_entry_id}`);
+
+  const { data: latestFinished } = await db
+    .from("matches")
+    .select("match_id")
+    .eq("tournament_id", tournamentId)
+    .eq("court_no", match.court_no)
+    .eq("state", "finished")
+    .eq("match_type", "regular")
+    .order("finished_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  const { count: winnerFinishedCount } = await db
+    .from("matches")
+    .select("*", { count: "exact", head: true })
+    .eq("tournament_id", tournamentId)
+    .eq("court_no", winnerDestCourtNo)
+    .eq("state", "finished")
+    .eq("match_type", "regular")
+    .neq("match_id", matchId)
+    .gt("finished_at", match.finished_at)
+    .or(`entry_a_id.eq.${match.winner_entry_id},entry_b_id.eq.${match.winner_entry_id}`);
+
+  const { count: loserFinishedCount } = await db
+    .from("matches")
+    .select("*", { count: "exact", head: true })
+    .eq("tournament_id", tournamentId)
+    .eq("court_no", loserDestCourtNo)
+    .eq("state", "finished")
+    .eq("match_type", "regular")
+    .neq("match_id", matchId)
+    .gt("finished_at", match.finished_at)
     .or(`entry_a_id.eq.${match.loser_entry_id},entry_b_id.eq.${match.loser_entry_id}`);
 
   const rollbackCheck = canRollback({
     matchState: match.state,
+    matchType: match.match_type ?? "regular",
+    isLatestFinishedOnCourt: latestFinished?.match_id === matchId,
     winnerInQueue: (winnerQueue?.length || 0) > 0,
     loserInQueue: (loserQueue?.length || 0) > 0,
     winnerInNewMatch: (winnerMatchCount || 0) > 0,
     loserInNewMatch: (loserMatchCount || 0) > 0,
+    winnerFinishedNewMatch: (winnerFinishedCount || 0) > 0,
+    loserFinishedNewMatch: (loserFinishedCount || 0) > 0,
   });
 
   if (!rollbackCheck.allowed) {
@@ -546,21 +964,108 @@ async function rollbackResult(
     );
   }
 
-  // 勝者・敗者を待機列から除去
+  const affectedCourts = new Set<number>([match.court_no]);
+
+  // Step 1: 勝者・敗者が自動移動先コートで in_progress 試合に入っている場合のみキャンセル
+  const cancelledMatchIds = new Set<string>();
+
+  const rollbackTargets: [string, number][] = [
+    [match.winner_entry_id!, winnerDestCourtNo],
+    [match.loser_entry_id!, loserDestCourtNo],
+  ];
+
+  for (const [entryId, destCourtNo] of rollbackTargets) {
+    if (!entryId) continue;
+    const { data: inProgressMatch } = await db
+      .from("matches")
+      .select("match_id, court_no, entry_a_id, entry_b_id")
+      .eq("tournament_id", tournamentId)
+      .eq("court_no", destCourtNo)
+      .eq("state", "in_progress")
+      .eq("match_type", "regular")
+      .or(`entry_a_id.eq.${entryId},entry_b_id.eq.${entryId}`)
+      .maybeSingle();
+
+    if (!inProgressMatch || cancelledMatchIds.has(inProgressMatch.match_id)) continue;
+    cancelledMatchIds.add(inProgressMatch.match_id);
+
+    // in_progress 試合をキャンセル
+    await db.from("matches").update({
+      state: "cancelled",
+      cancelled_at: new Date().toISOString(),
+      cancel_reason: "rollback",
+    }).eq("match_id", inProgressMatch.match_id);
+
+    // current_match_id をクリア
+    await db.from("courts").update({ current_match_id: null })
+      .eq("tournament_id", tournamentId)
+      .eq("court_no", inProgressMatch.court_no);
+
+    // ロールバック対象の勝者/敗者を除いた、キャンセル試合のエントリーを待機列先頭に戻す
+    const rollbackEntryIds = new Set([match.winner_entry_id, match.loser_entry_id].filter(Boolean));
+    const entriesToRequeue = [inProgressMatch.entry_a_id, inProgressMatch.entry_b_id]
+      .filter((id) => !rollbackEntryIds.has(id));
+
+    if (entriesToRequeue.length > 0) {
+      const { data: destQueue } = await db
+        .from("queue_items")
+        .select("queue_item_id, queue_position")
+        .eq("tournament_id", tournamentId)
+        .eq("court_no", inProgressMatch.court_no)
+        .order("queue_position", { ascending: false });
+
+      const shift = entriesToRequeue.length;
+      for (const item of destQueue || []) {
+        await db.from("queue_items")
+          .update({ queue_position: item.queue_position + shift })
+          .eq("queue_item_id", item.queue_item_id);
+      }
+
+      for (let i = 0; i < entriesToRequeue.length; i++) {
+        await db.from("queue_items").insert({
+          tournament_id: tournamentId,
+          court_no: inProgressMatch.court_no,
+          entry_id: entriesToRequeue[i],
+          queue_position: i + 1,
+          enqueue_reason: "rollback",
+          source_match_id: inProgressMatch.match_id,
+        });
+      }
+    }
+
+    // movement_log はキャンセル試合の全エントリー分記録
+    const cancelledEntries = [inProgressMatch.entry_a_id, inProgressMatch.entry_b_id];
+    await db.from("movement_logs").insert(
+      cancelledEntries.map((eid) => ({
+        tournament_id: tournamentId,
+        match_id: inProgressMatch.match_id,
+        entry_id: eid,
+        from_court_no: inProgressMatch.court_no,
+        to_court_no: inProgressMatch.court_no,
+        movement_reason: "rollback",
+      })),
+    );
+
+    affectedCourts.add(inProgressMatch.court_no);
+  }
+
+  // Step 2: 勝者・敗者を移動先の待機列から除去
   if (winnerQueue && winnerQueue.length > 0) {
     for (const item of winnerQueue) {
       await db.from("queue_items").delete().eq("queue_item_id", item.queue_item_id);
       await resequenceQueue(db, tournamentId, item.court_no);
+      affectedCourts.add(item.court_no);
     }
   }
   if (loserQueue && loserQueue.length > 0) {
     for (const item of loserQueue) {
       await db.from("queue_items").delete().eq("queue_item_id", item.queue_item_id);
       await resequenceQueue(db, tournamentId, item.court_no);
+      affectedCourts.add(item.court_no);
     }
   }
 
-  // 試合を cancelled に更新
+  // Step 3: 対象試合を cancelled に更新
   await db
     .from("matches")
     .update({
@@ -571,38 +1076,65 @@ async function rollbackResult(
     })
     .eq("match_id", matchId);
 
-  // 元のコートの current_match_id を設定して in_progress に戻す
-  // → 試合を in_progress に戻すのではなく、cancelled にして両者を元コートの待機列に戻す
+  // Step 4: 元コートの待機列の元の位置に復元
   const { data: origQueue } = await db
     .from("queue_items")
-    .select("queue_item_id, queue_position")
+    .select("entry_id, queue_position")
     .eq("tournament_id", tournamentId)
     .eq("court_no", match.court_no)
     .order("queue_position");
 
-  const maxPos = origQueue && origQueue.length > 0
-    ? Math.max(...origQueue.map((q: { queue_position: number }) => q.queue_position))
-    : 0;
+  const currentQueue = (origQueue || []).map((q: { entry_id: string; queue_position: number }) => ({
+    entryId: q.entry_id,
+    queuePosition: q.queue_position,
+  }));
 
-  // entry_a → entry_b の順で元コートの待機列末尾に追加
-  await db.from("queue_items").insert({
-    tournament_id: tournamentId,
-    court_no: match.court_no,
-    entry_id: match.entry_a_id,
-    queue_position: maxPos + 1,
-    enqueue_reason: "rollback",
-    source_match_id: matchId,
-  });
-  await db.from("queue_items").insert({
-    tournament_id: tournamentId,
-    court_no: match.court_no,
-    entry_id: match.entry_b_id,
-    queue_position: maxPos + 2,
-    enqueue_reason: "rollback",
-    source_match_id: matchId,
-  });
+  const posA = match.entry_a_original_queue_position as number | null;
+  const posB = match.entry_b_original_queue_position as number | null;
 
-  // rollback 用の movement_log
+  if (posA != null && posB != null) {
+    // v2.7: 元の位置に復元
+    const restored = restoreToOriginalPosition(currentQueue, match.entry_a_id, posA, match.entry_b_id, posB);
+
+    await db.from("queue_items").delete()
+      .eq("tournament_id", tournamentId)
+      .eq("court_no", match.court_no);
+
+    for (const item of restored) {
+      await db.from("queue_items").insert({
+        tournament_id: tournamentId,
+        court_no: match.court_no,
+        entry_id: item.entryId,
+        queue_position: item.queuePosition,
+        enqueue_reason: item.entryId === match.entry_a_id || item.entryId === match.entry_b_id ? "rollback" : "result",
+        source_match_id: item.entryId === match.entry_a_id || item.entryId === match.entry_b_id ? matchId : undefined,
+      });
+    }
+  } else {
+    // v2.7 以前のデータ: 末尾追加にフォールバック
+    const maxPos = currentQueue.length > 0
+      ? Math.max(...currentQueue.map((q) => q.queuePosition))
+      : 0;
+
+    await db.from("queue_items").insert({
+      tournament_id: tournamentId,
+      court_no: match.court_no,
+      entry_id: match.entry_a_id,
+      queue_position: maxPos + 1,
+      enqueue_reason: "rollback",
+      source_match_id: matchId,
+    });
+    await db.from("queue_items").insert({
+      tournament_id: tournamentId,
+      court_no: match.court_no,
+      entry_id: match.entry_b_id,
+      queue_position: maxPos + 2,
+      enqueue_reason: "rollback",
+      source_match_id: matchId,
+    });
+  }
+
+  // Step 5: rollback 用の movement_log
   await db.from("movement_logs").insert([
     {
       tournament_id: tournamentId,
@@ -622,16 +1154,18 @@ async function rollbackResult(
     },
   ]);
 
-  // 元コートで自動試合生成を試みる
+  // Step 6: 影響コートで自動試合生成を試みる
   const { data: courts } = await db
     .from("courts")
     .select("court_id, court_no, status, current_match_id")
     .eq("tournament_id", tournamentId)
     .order("court_no");
 
-  await tryAutoGenerateMatch(db, tournamentId, match.court_no, courts || []);
+  for (const courtNo of affectedCourts) {
+    await tryAutoGenerateMatch(db, tournamentId, courtNo, courts || []);
+  }
 
-  // revision 加算
+  // Step 7: revision 加算
   const { data: tournament } = await db
     .from("tournaments")
     .select("revision")
@@ -645,7 +1179,7 @@ async function rollbackResult(
 
   return successResponse({
     match: { match_id: matchId, state: "cancelled", cancel_reason: "rollback" },
-    affected_courts: [match.court_no],
+    affected_courts: [...affectedCourts].sort((a, b) => a - b),
   }, { revision: newRevision });
 }
 
@@ -683,7 +1217,8 @@ async function tryAutoGenerateMatch(
     .select("*", { count: "exact", head: true })
     .eq("tournament_id", tournamentId)
     .eq("court_no", courtNo)
-    .eq("state", "in_progress");
+    .eq("state", "in_progress")
+    .eq("match_type", "regular");
 
   // 待機列サイズ
   const { data: queue } = await db
@@ -713,7 +1248,21 @@ async function tryAutoGenerateMatch(
     entryId: q.entry_id,
     queuePosition: q.queue_position,
   }));
-  const { entryA, entryB, remainingQueue } = pickMatchEntries(queueEntries);
+  const {
+    entryA,
+    entryB,
+    entryAOriginalQueuePosition,
+    entryBOriginalQueuePosition,
+  } = pickMatchEntries(queueEntries);
+
+  // ピック対象が既に別の in_progress 試合に入っていないか確認（リクエスト試合含む）
+  const { count: pickedInProgress } = await db
+    .from("matches")
+    .select("*", { count: "exact", head: true })
+    .eq("tournament_id", tournamentId)
+    .eq("state", "in_progress")
+    .or(`entry_a_id.in.(${entryA},${entryB}),entry_b_id.in.(${entryA},${entryB})`);
+  if ((pickedInProgress || 0) > 0) return;
 
   // エントリーのスナップショットを作成
   const snapshotA = await buildEntrySnapshot(db, tournamentId, entryA);
@@ -725,10 +1274,13 @@ async function tryAutoGenerateMatch(
     .insert({
       tournament_id: tournamentId,
       court_no: courtNo,
+      match_type: "regular",
       entry_a_id: entryA,
       entry_b_id: entryB,
       entry_a_snapshot: snapshotA,
       entry_b_snapshot: snapshotB,
+      entry_a_original_queue_position: entryAOriginalQueuePosition,
+      entry_b_original_queue_position: entryBOriginalQueuePosition,
     })
     .select()
     .single();

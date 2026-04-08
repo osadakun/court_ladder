@@ -1,13 +1,14 @@
-import { useEffect } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { useParams } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Trophy, Swords } from 'lucide-react'
 import { hexToRgba } from '../lib/colors'
-
-const API_BASE = import.meta.env.VITE_API_BASE_URL || ''
+import { api } from '../lib/api'
+import { useRealtime } from '../hooks/useRealtime'
 
 interface PublicSnapshot {
   tournament: {
+    tournament_id: string
     name: string
     public_page_title: string | null
     state: string
@@ -29,18 +30,31 @@ interface PublicSnapshot {
 
 export function PublicBoardPage() {
   const { token } = useParams<{ token: string }>()
+  const queryClient = useQueryClient()
+  const [tournamentId, setTournamentId] = useState<string | undefined>(undefined)
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['public-snapshot', token],
     queryFn: async () => {
-      const res = await fetch(`${API_BASE}/api/public-api/${token}/snapshot`)
-      if (!res.ok) throw new Error('大会が見つかりません')
-      const json = await res.json()
-      return json.data as PublicSnapshot
+      const res = await api<PublicSnapshot>(`/api/public-api/${token}/snapshot`)
+      if (res.error) throw new Error(res.error.code === 'NOT_FOUND' ? 'NOT_FOUND' : 'NETWORK_ERROR')
+      return res.data!
     },
-    refetchInterval: 10000,
+    refetchInterval: 3000,
     enabled: !!token,
   })
+
+  useEffect(() => {
+    if (data?.tournament.tournament_id) {
+      setTournamentId(data.tournament.tournament_id)
+    }
+  }, [data?.tournament.tournament_id])
+
+  const handleRevisionChange = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: ['public-snapshot', token] })
+  }, [queryClient, token])
+
+  useRealtime(tournamentId, handleRevisionChange)
 
   const title = data ? (data.tournament.public_page_title || data.tournament.name) : '公開盤面'
 
@@ -57,7 +71,7 @@ export function PublicBoardPage() {
       created = true
     }
 
-    robotsMeta.setAttribute('content', 'noindex,nofollow')
+    robotsMeta.setAttribute('content', 'noindex,nofollow,noarchive')
 
     return () => {
       if (created) {
@@ -76,13 +90,18 @@ export function PublicBoardPage() {
     )
   }
 
-  if (error || !data) {
+  if (error) {
+    const isNotFound = error instanceof Error && error.message === 'NOT_FOUND'
     return (
       <div className="min-h-screen bg-gray-900 flex items-center justify-center">
-        <div className="text-red-400">大会が見つかりません</div>
+        <div className={isNotFound ? 'text-red-400' : 'text-gray-400'}>
+          {isNotFound ? '大会が見つかりません' : '接続中...'}
+        </div>
       </div>
     )
   }
+
+  if (!data) return null
 
   return (
     <div className="min-h-screen bg-gray-900 text-white">

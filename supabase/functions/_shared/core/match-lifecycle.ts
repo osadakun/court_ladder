@@ -41,21 +41,43 @@ export function determineLoser(
  */
 export function canRollback(ctx: {
   matchState: string;
+  matchType: string;
+  isLatestFinishedOnCourt: boolean;
   winnerInQueue: boolean;
   loserInQueue: boolean;
   winnerInNewMatch: boolean;
   loserInNewMatch: boolean;
+  winnerFinishedNewMatch: boolean;
+  loserFinishedNewMatch: boolean;
 }): { allowed: boolean; errorCode: string | null } {
   if (ctx.matchState !== "finished") {
     return { allowed: false, errorCode: "MATCH_NOT_FINISHED" };
   }
-  if (
-    ctx.winnerInNewMatch ||
-    ctx.loserInNewMatch ||
-    !ctx.winnerInQueue ||
-    !ctx.loserInQueue
-  ) {
+  if (ctx.matchType !== "regular") {
     return { allowed: false, errorCode: "AUTO_ROLLBACK_NOT_ALLOWED" };
+  }
+  if (!ctx.isLatestFinishedOnCourt) {
+    return { allowed: false, errorCode: "AUTO_ROLLBACK_NOT_ALLOWED" };
+  }
+  if (ctx.winnerFinishedNewMatch || ctx.loserFinishedNewMatch) {
+    return { allowed: false, errorCode: "AUTO_ROLLBACK_NOT_ALLOWED" };
+  }
+  const winnerReachable = ctx.winnerInQueue || ctx.winnerInNewMatch;
+  const loserReachable = ctx.loserInQueue || ctx.loserInNewMatch;
+  if (!winnerReachable || !loserReachable) {
+    return { allowed: false, errorCode: "AUTO_ROLLBACK_NOT_ALLOWED" };
+  }
+  return { allowed: true, errorCode: null };
+}
+
+/**
+ * §4-13 完了済み試合の結果再入力可否を判定する
+ */
+export function canReenterResult(ctx: {
+  matchState: string;
+}): { allowed: boolean; errorCode: string | null } {
+  if (ctx.matchState !== "finished") {
+    return { allowed: false, errorCode: "MATCH_NOT_FINISHED" };
   }
   return { allowed: true, errorCode: null };
 }

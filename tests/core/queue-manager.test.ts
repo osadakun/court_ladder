@@ -7,6 +7,7 @@ import {
   removeFromQueue,
   canAutoGenerateMatch,
   pickMatchEntries,
+  restoreToOriginalPosition,
 } from "../../supabase/functions/_shared/core/queue-manager.ts";
 
 import type { QueueEntry } from "../../supabase/functions/_shared/core/types.ts";
@@ -202,6 +203,8 @@ Deno.test("§4-6 ピック: 先頭2組を取り出し、残りの待機列を返
   const result = pickMatchEntries(queue);
   assertEquals(result.entryA, "e1");
   assertEquals(result.entryB, "e2");
+  assertEquals(result.entryAOriginalQueuePosition, 1);
+  assertEquals(result.entryBOriginalQueuePosition, 2);
   assertEquals(result.remainingQueue, [
     { entryId: "e3", queuePosition: 1 },
     { entryId: "e4", queuePosition: 2 },
@@ -216,6 +219,8 @@ Deno.test("§4-6 ピック: ちょうど2組 → 残りは空", () => {
   const result = pickMatchEntries(queue);
   assertEquals(result.entryA, "e1");
   assertEquals(result.entryB, "e2");
+  assertEquals(result.entryAOriginalQueuePosition, 1);
+  assertEquals(result.entryBOriginalQueuePosition, 2);
   assertEquals(result.remainingQueue, []);
 });
 
@@ -229,8 +234,105 @@ Deno.test("§4-6 ピック: position順にソートされた先頭2組を取る"
   const result = pickMatchEntries(queue);
   assertEquals(result.entryA, "e1");
   assertEquals(result.entryB, "e3");
+  assertEquals(result.entryAOriginalQueuePosition, 1);
+  assertEquals(result.entryBOriginalQueuePosition, 5);
   assertEquals(result.remainingQueue, [
     { entryId: "e5", queuePosition: 1 },
+  ]);
+});
+
+Deno.test("§4-6 v2.7 ピック: 元のqueuePositionを返す", () => {
+  const queue: QueueEntry[] = [
+    { entryId: "e1", queuePosition: 1 },
+    { entryId: "e2", queuePosition: 2 },
+    { entryId: "e3", queuePosition: 3 },
+  ];
+  const result = pickMatchEntries(queue);
+  assertEquals(result.entryAOriginalQueuePosition, 1);
+  assertEquals(result.entryBOriginalQueuePosition, 2);
+});
+
+Deno.test("§4-6 v2.7 ピック: 非連続positionでも元の値を返す", () => {
+  const queue: QueueEntry[] = [
+    { entryId: "e5", queuePosition: 10 },
+    { entryId: "e3", queuePosition: 5 },
+    { entryId: "e1", queuePosition: 1 },
+  ];
+  const result = pickMatchEntries(queue);
+  assertEquals(result.entryAOriginalQueuePosition, 1);
+  assertEquals(result.entryBOriginalQueuePosition, 5);
+});
+
+// ============================================================
+// FR-10 v2.7 元の位置への復元
+// ============================================================
+Deno.test("FR-10 v2.7 復元: 空の待機列に position 1, 2 で復元", () => {
+  const result = restoreToOriginalPosition([], "eA", 1, "eB", 2);
+  assertEquals(result, [
+    { entryId: "eA", queuePosition: 1 },
+    { entryId: "eB", queuePosition: 2 },
+  ]);
+});
+
+Deno.test("FR-10 v2.7 復元: 既存3件に position 1, 2 で先頭挿入 → 既存が後方シフト", () => {
+  const queue: QueueEntry[] = [
+    { entryId: "e1", queuePosition: 1 },
+    { entryId: "e2", queuePosition: 2 },
+    { entryId: "e3", queuePosition: 3 },
+  ];
+  const result = restoreToOriginalPosition(queue, "eA", 1, "eB", 2);
+  assertEquals(result, [
+    { entryId: "eA", queuePosition: 1 },
+    { entryId: "eB", queuePosition: 2 },
+    { entryId: "e1", queuePosition: 3 },
+    { entryId: "e2", queuePosition: 4 },
+    { entryId: "e3", queuePosition: 5 },
+  ]);
+});
+
+Deno.test("FR-10 v2.7 復元: 元位置が 3, 4 → 既存1,2はそのまま、3以降が後方シフト", () => {
+  const queue: QueueEntry[] = [
+    { entryId: "e1", queuePosition: 1 },
+    { entryId: "e2", queuePosition: 2 },
+    { entryId: "e5", queuePosition: 3 },
+    { entryId: "e6", queuePosition: 4 },
+  ];
+  const result = restoreToOriginalPosition(queue, "eA", 3, "eB", 4);
+  assertEquals(result, [
+    { entryId: "e1", queuePosition: 1 },
+    { entryId: "e2", queuePosition: 2 },
+    { entryId: "eA", queuePosition: 3 },
+    { entryId: "eB", queuePosition: 4 },
+    { entryId: "e5", queuePosition: 5 },
+    { entryId: "e6", queuePosition: 6 },
+  ]);
+});
+
+Deno.test("FR-10 v2.7 復元: 元位置が 2, 4（非連続）→ 正しく挿入", () => {
+  const queue: QueueEntry[] = [
+    { entryId: "e1", queuePosition: 1 },
+    { entryId: "e3", queuePosition: 2 },
+    { entryId: "e5", queuePosition: 3 },
+  ];
+  const result = restoreToOriginalPosition(queue, "eA", 2, "eB", 4);
+  assertEquals(result, [
+    { entryId: "e1", queuePosition: 1 },
+    { entryId: "eA", queuePosition: 2 },
+    { entryId: "e3", queuePosition: 3 },
+    { entryId: "eB", queuePosition: 4 },
+    { entryId: "e5", queuePosition: 5 },
+  ]);
+});
+
+Deno.test("FR-10 v2.7 復元: 元位置が既存待機列のサイズを超える → 末尾に追加", () => {
+  const queue: QueueEntry[] = [
+    { entryId: "e1", queuePosition: 1 },
+  ];
+  const result = restoreToOriginalPosition(queue, "eA", 5, "eB", 6);
+  assertEquals(result, [
+    { entryId: "e1", queuePosition: 1 },
+    { entryId: "eA", queuePosition: 2 },
+    { entryId: "eB", queuePosition: 3 },
   ]);
 });
 

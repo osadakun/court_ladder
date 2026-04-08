@@ -9,7 +9,7 @@ import { createSimplePdf } from "../_shared/pdf.ts";
 
 type HistoryMatch = {
   match_id: string;
-  court_no: number;
+  court_no: number | null;
   entry_a_id: string;
   entry_b_id: string;
   entry_a_snapshot: { display_name?: string } | null;
@@ -168,7 +168,7 @@ async function exportMatchesCsv(tournamentId: string): Promise<Response> {
 
   const rows = data.map((m) => [
     m.match_id,
-    m.court_no,
+    m.court_no ?? "",
     m.entry_a_snapshot?.display_name || m.entry_a_id,
     m.entry_b_snapshot?.display_name || m.entry_b_id,
     m.score_a ?? "",
@@ -258,8 +258,9 @@ async function exportResultsPdf(tournamentId: string): Promise<Response> {
     const score = match.score_a === null && match.score_b === null
       ? "-"
       : `${match.score_a ?? "-"}-${match.score_b ?? "-"}`;
+    const courtLabel = match.court_no != null ? match.court_no.toString().padStart(2, " ") : "RQ";
     lines.push(
-      `${match.court_no.toString().padStart(2, " ")} | ${entryA} vs ${entryB} | ${score} | ${match.outcome_type || "-"} | ${winner}`,
+      `${courtLabel} | ${entryA} vs ${entryB} | ${score} | ${match.outcome_type || "-"} | ${winner}`,
     );
   }
 

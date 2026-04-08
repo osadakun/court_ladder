@@ -16,6 +16,7 @@ interface Props {
 type Step = 'input' | 'preview'
 
 export function ResultInputDialog({ match, tournamentId, gamePoint, onClose, onConfirmed }: Props) {
+  const isRequest = match.match_type === 'request'
   const [step, setStep] = useState<Step>('input')
   const [winnerId, setWinnerId] = useState<string | null>(null)
   const [loserScore, setLoserScore] = useState<number | null>(null)
@@ -94,7 +95,9 @@ export function ResultInputDialog({ match, tournamentId, gamePoint, onClose, onC
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
       <div className="bg-white rounded-lg shadow-lg w-full max-w-md max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
         <div className="px-6 py-4 border-b">
-          <h2 className="font-bold text-gray-900">結果入力 - コート {match.court_no}</h2>
+          <h2 className="font-bold text-gray-900">
+            結果入力{isRequest ? '（リクエスト試合）' : ` - コート ${match.court_no}`}
+          </h2>
         </div>
 
         <div className="p-6 space-y-5">
@@ -191,13 +194,23 @@ export function ResultInputDialog({ match, tournamentId, gamePoint, onClose, onC
                 <button onClick={onClose} className="px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded-md">
                   キャンセル
                 </button>
-                <button
-                  disabled={!isInputComplete || previewMutation.isPending}
-                  onClick={() => previewMutation.mutate()}
-                  className="px-4 py-2 bg-blue-600 text-white text-sm rounded-md hover:bg-blue-700 disabled:opacity-50"
-                >
-                  {previewMutation.isPending ? '計算中...' : 'プレビュー'}
-                </button>
+                {isRequest ? (
+                  <button
+                    disabled={!isInputComplete || confirmMutation.isPending}
+                    onClick={() => confirmMutation.mutate()}
+                    className="px-4 py-2 bg-green-600 text-white text-sm font-medium rounded-md hover:bg-green-700 disabled:opacity-50"
+                  >
+                    {confirmMutation.isPending ? '確定中...' : '結果を確定（移動なし）'}
+                  </button>
+                ) : (
+                  <button
+                    disabled={!isInputComplete || previewMutation.isPending}
+                    onClick={() => previewMutation.mutate()}
+                    className="px-4 py-2 bg-blue-600 text-white text-sm rounded-md hover:bg-blue-700 disabled:opacity-50"
+                  >
+                    {previewMutation.isPending ? '計算中...' : 'プレビュー'}
+                  </button>
+                )}
               </div>
             </>
           )}

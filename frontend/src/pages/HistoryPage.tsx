@@ -1,10 +1,11 @@
 import { useState } from 'react'
 import { useParams } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
-import { Download } from 'lucide-react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { Download, Edit3 } from 'lucide-react'
 import { toast } from 'sonner'
 import { api, downloadFileBlob } from '../lib/api'
 import { hexToRgba } from '../lib/colors'
+import { ReenterResultDialog } from '../components/match/ReenterResultDialog'
 import type { Match, Tournament } from '../types'
 
 type Tab = 'matches' | 'movements' | 'audit-logs'
@@ -30,9 +31,11 @@ interface AuditLog {
 
 export function HistoryPage() {
   const { tid } = useParams<{ tid: string }>()
+  const queryClient = useQueryClient()
   const [tab, setTab] = useState<Tab>('matches')
   const [page, setPage] = useState(1)
   const [courtFilter, setCourtFilter] = useState('')
+  const [reenterMatch, setReenterMatch] = useState<Match | null>(null)
 
   const { data: matchData, isLoading: matchLoading } = useQuery({
     queryKey: ['history-matches', tid, page, courtFilter],
@@ -164,6 +167,7 @@ export function HistoryPage() {
                     <th className="px-3 py-2 text-left">スコア</th>
                     <th className="px-3 py-2 text-left">状態</th>
                     <th className="px-3 py-2 text-left">日時</th>
+                    <th className="px-3 py-2 text-left"></th>
                   </tr>
                 </thead>
                 <tbody>
@@ -183,7 +187,12 @@ export function HistoryPage() {
                     const hasResult = !!m.winner_entry_id
                     return (
                       <tr key={m.match_id} className="border-b">
-                        <td className="px-3 py-2 text-center font-medium">{m.court_no}</td>
+                        <td className="px-3 py-2 text-center font-medium">
+                          {m.court_no ?? '-'}
+                          {m.match_type === 'request' && (
+                            <span className="ml-1 px-1 py-0.5 bg-purple-100 text-purple-700 text-[10px] rounded">リクエスト</span>
+                          )}
+                        </td>
                         <td className="px-3 py-2">
                           <MatchEntryCell name={leftName} teamColor={leftColor} isWinner={hasResult} hasResult={hasResult} />
                         </td>
@@ -198,6 +207,18 @@ export function HistoryPage() {
                         </td>
                         <td className="px-3 py-2 text-gray-500 text-xs">
                           {m.finished_at ? new Date(m.finished_at).toLocaleString('ja-JP') : '-'}
+                        </td>
+                        <td className="px-3 py-2">
+                          {m.state === 'finished' && tournament?.state !== 'ended' && (
+                            <button
+                              onClick={() => setReenterMatch(m)}
+                              className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800"
+                              title="結果再入力"
+                            >
+                              <Edit3 className="w-3 h-3" />
+                              再入力
+                            </button>
+                          )}
                         </td>
                       </tr>
                     )
@@ -292,6 +313,20 @@ export function HistoryPage() {
           次へ
         </button>
       </div>
+
+      {/* 結果再入力ダイアログ */}
+      {reenterMatch && tid && tournament && (
+        <ReenterResultDialog
+          match={reenterMatch}
+          tournamentId={tid}
+          gamePoint={tournament.game_point}
+          onClose={() => setReenterMatch(null)}
+          onConfirmed={() => {
+            setReenterMatch(null)
+            queryClient.invalidateQueries({ queryKey: ['history-matches', tid] })
+          }}
+        />
+      )}
     </div>
   )
 }

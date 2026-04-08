@@ -1,4 +1,5 @@
-import { Swords, PauseCircle, Users, Play, StopCircle, RotateCcw, XCircle, Undo2 } from 'lucide-react'
+import { Swords, PauseCircle, Users, Play, StopCircle, RotateCcw, XCircle, Undo2, GripVertical } from 'lucide-react'
+import { useDraggable, useDroppable } from '@dnd-kit/core'
 import type { Court, Match, QueueItem } from '../../types'
 import { hexToRgba } from '../../lib/colors'
 import { buildDisplayName } from '../../lib/displayName'
@@ -9,6 +10,7 @@ interface Props {
   lastFinishedMatch?: Match | null
   queue: QueueItem[]
   tournamentState: string
+  isDndEnabled?: boolean
   onResultInput?: () => void
   onStopCourt?: () => void
   onResumeCourt?: () => void
@@ -17,11 +19,19 @@ interface Props {
   onRollback?: (matchId: string) => void
 }
 
-export function CourtCard({ court, currentMatch, lastFinishedMatch, queue, tournamentState, onResultInput, onStopCourt, onResumeCourt, onRecalculate, onClearMatch, onRollback }: Props) {
+export function CourtCard({ court, currentMatch, lastFinishedMatch, queue, tournamentState, isDndEnabled, onResultInput, onStopCourt, onResumeCourt, onRecalculate, onClearMatch, onRollback }: Props) {
   const isStopped = court.status === 'stopped'
 
+  const { setNodeRef: setDropRef, isOver } = useDroppable({
+    id: `court-drop-${court.court_no}`,
+    disabled: !isDndEnabled,
+  })
+
   return (
-    <div className={`bg-white rounded-lg border ${isStopped ? 'border-red-200 bg-red-50/30' : 'border-gray-200'} overflow-hidden`}>
+    <div
+      ref={setDropRef}
+      className={`bg-white rounded-lg border ${isStopped ? 'border-red-200 bg-red-50/30' : isOver ? 'border-blue-400 bg-blue-50/30' : 'border-gray-200'} overflow-hidden transition-colors`}
+    >
       {/* ヘッダー */}
       <div className={`px-4 py-2 flex items-center justify-between ${isStopped ? 'bg-red-50' : 'bg-gray-50'} border-b`}>
         <div className="flex items-center gap-2">
@@ -65,9 +75,17 @@ export function CourtCard({ court, currentMatch, lastFinishedMatch, queue, tourn
               <span className="text-xs font-medium text-gray-500">対戦中</span>
             </div>
             <div className="space-y-1.5">
-              <EntryDisplay snapshot={currentMatch.entry_a_snapshot} />
+              <DraggableEntry
+                id={`match-${court.court_no}-${currentMatch.entry_a_id}`}
+                enabled={!!isDndEnabled}
+                snapshot={currentMatch.entry_a_snapshot}
+              />
               <div className="text-xs text-gray-400 text-center">vs</div>
-              <EntryDisplay snapshot={currentMatch.entry_b_snapshot} />
+              <DraggableEntry
+                id={`match-${court.court_no}-${currentMatch.entry_b_id}`}
+                enabled={!!isDndEnabled}
+                snapshot={currentMatch.entry_b_snapshot}
+              />
             </div>
             {tournamentState === 'live' && (
               <div className="mt-3 space-y-1.5">
@@ -111,7 +129,7 @@ export function CourtCard({ court, currentMatch, lastFinishedMatch, queue, tourn
       </div>
 
       {/* 直近試合ロールバック */}
-      {tournamentState === 'live' && lastFinishedMatch && onRollback && (
+      {tournamentState === 'live' && lastFinishedMatch && lastFinishedMatch.match_type === 'regular' && onRollback && (
         <div className="border-t px-4 py-2">
           <button
             onClick={() => onRollback(lastFinishedMatch.match_id)}
@@ -130,14 +148,12 @@ export function CourtCard({ court, currentMatch, lastFinishedMatch, queue, tourn
           <div className="text-xs text-gray-500 mb-1.5">待機列</div>
           <div className="space-y-1">
             {queue.slice(0, 5).map((q) => (
-              <div key={q.queue_item_id || q.entry_id} className="text-xs text-gray-600 flex items-center gap-1.5">
-                <span className="text-gray-400 w-4 text-right">{q.queue_position}.</span>
-                {q.entry ? (
-                  <QueueEntryDisplay entry={q.entry} />
-                ) : (
-                  <span>{q.entry_id.slice(0, 8)}...</span>
-                )}
-              </div>
+              <DraggableQueueItem
+                key={q.queue_item_id || q.entry_id}
+                id={`queue-${court.court_no}-${q.entry_id}`}
+                enabled={!!isDndEnabled}
+                queueItem={q}
+              />
             ))}
             {queue.length > 5 && (
               <div className="text-xs text-gray-400">他 {queue.length - 5} 組</div>
@@ -149,24 +165,60 @@ export function CourtCard({ court, currentMatch, lastFinishedMatch, queue, tourn
   )
 }
 
-function EntryDisplay({ snapshot }: { snapshot: { display_name: string; team_color: string | null; team_name: string | null } | null }) {
+function DraggableEntry({ id, enabled, snapshot }: {
+  id: string
+  enabled: boolean
+  snapshot: { display_name: string; team_color: string | null; team_name: string | null } | null
+}) {
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+    id,
+    disabled: !enabled,
+  })
+
   if (!snapshot) return <div className="text-sm text-gray-400">-</div>
   const backgroundColor = hexToRgba(snapshot.team_color, 0.18)
+
   return (
-    <div className="rounded-md px-2 py-1.5" style={backgroundColor ? { backgroundColor } : undefined}>
+    <div
+      ref={setNodeRef}
+      {...attributes}
+      {...listeners}
+      className={`rounded-md px-2 py-1.5 flex items-center gap-1 ${enabled ? 'cursor-grab active:cursor-grabbing' : ''} ${isDragging ? 'opacity-40' : ''}`}
+      style={backgroundColor ? { backgroundColor } : undefined}
+    >
+      {enabled && <GripVertical className="w-3 h-3 text-gray-400 flex-shrink-0" />}
       <span className="text-sm font-medium text-gray-800 truncate">{snapshot.display_name}</span>
     </div>
   )
 }
 
-function QueueEntryDisplay({ entry }: { entry: { team?: { color_code: string; team_name: string } | null; entry_members?: { member_order: number; member: { management_name: string; grade?: string | null } }[] } }) {
-  const teamColor = entry.team?.color_code
-  const displayName = buildDisplayName(entry)
+function DraggableQueueItem({ id, enabled, queueItem }: {
+  id: string
+  enabled: boolean
+  queueItem: QueueItem
+}) {
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+    id,
+    disabled: !enabled,
+  })
+
+  const entry = queueItem.entry
+  const teamColor = entry?.team?.color_code
+  const displayName = entry ? buildDisplayName(entry) : queueItem.entry_id.slice(0, 8) + '...'
   const backgroundColor = hexToRgba(teamColor, 0.18)
 
   return (
-    <div className="truncate rounded px-2 py-1" style={backgroundColor ? { backgroundColor } : undefined}>
-      <span className="truncate">{displayName || '-'}</span>
+    <div
+      ref={setNodeRef}
+      {...attributes}
+      {...listeners}
+      className={`text-xs text-gray-600 flex items-center gap-1 ${enabled ? 'cursor-grab active:cursor-grabbing' : ''} ${isDragging ? 'opacity-40' : ''}`}
+    >
+      {enabled && <GripVertical className="w-3 h-3 text-gray-400 flex-shrink-0" />}
+      <span className="text-gray-400 w-4 text-right">{queueItem.queue_position}.</span>
+      <div className="truncate rounded px-2 py-1 flex-1" style={backgroundColor ? { backgroundColor } : undefined}>
+        <span className="truncate">{displayName}</span>
+      </div>
     </div>
   )
 }

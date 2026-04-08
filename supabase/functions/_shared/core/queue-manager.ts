@@ -3,7 +3,7 @@
  * spec.md §4-5, §4-6
  */
 
-import type { QueueEntry, CourtStatus } from "./types.ts";
+import type { QueueEntry, CourtStatus, PickedMatch } from "./types.ts";
 
 /**
  * §4-5-2 待機列末尾にエントリーを追加する
@@ -134,17 +134,77 @@ export function canAutoGenerateMatch(ctx: {
  * §4-6 待機列の先頭2組をピックし、残りの待機列を返す
  * queue は queuePosition 順にソートされている前提ではなく、内部でソートする
  */
-export function pickMatchEntries(queue: QueueEntry[]): {
-  entryA: string;
-  entryB: string;
-  remainingQueue: QueueEntry[];
-} {
+export function pickMatchEntries(queue: QueueEntry[]): PickedMatch {
   const sorted = [...queue].sort((a, b) => a.queuePosition - b.queuePosition);
   const entryA = sorted[0].entryId;
   const entryB = sorted[1].entryId;
+  const entryAOriginalQueuePosition = sorted[0].queuePosition;
+  const entryBOriginalQueuePosition = sorted[1].queuePosition;
   const remaining = sorted.slice(2).map((q, i) => ({
     entryId: q.entryId,
     queuePosition: i + 1,
   }));
-  return { entryA, entryB, remainingQueue: remaining };
+  return {
+    entryA,
+    entryB,
+    entryAOriginalQueuePosition,
+    entryBOriginalQueuePosition,
+    remainingQueue: remaining,
+  };
+}
+
+/**
+ * FR-10 v2.7 ロールバック時に元の位置へ復元する
+ */
+export function restoreToOriginalPosition(
+  queue: QueueEntry[],
+  entryAId: string,
+  entryAOrigPos: number,
+  entryBId: string,
+  entryBOrigPos: number,
+): QueueEntry[] {
+  const sorted = [...queue].sort((a, b) => a.queuePosition - b.queuePosition);
+  const toRestore = [
+    { entryId: entryAId, origPos: entryAOrigPos },
+    { entryId: entryBId, origPos: entryBOrigPos },
+  ].sort((a, b) => a.origPos - b.origPos);
+
+  const result: QueueEntry[] = [];
+  let restoreIdx = 0;
+  let existingIdx = 0;
+  let currentOrigPos = 1;
+
+  while (restoreIdx < toRestore.length || existingIdx < sorted.length) {
+    if (
+      restoreIdx < toRestore.length &&
+      toRestore[restoreIdx].origPos <= currentOrigPos
+    ) {
+      result.push({
+        entryId: toRestore[restoreIdx].entryId,
+        queuePosition: result.length + 1,
+      });
+      restoreIdx++;
+      currentOrigPos++;
+      continue;
+    }
+
+    if (existingIdx < sorted.length) {
+      result.push({
+        entryId: sorted[existingIdx].entryId,
+        queuePosition: result.length + 1,
+      });
+      existingIdx++;
+      currentOrigPos++;
+      continue;
+    }
+
+    result.push({
+      entryId: toRestore[restoreIdx].entryId,
+      queuePosition: result.length + 1,
+    });
+    restoreIdx++;
+    currentOrigPos++;
+  }
+
+  return result;
 }

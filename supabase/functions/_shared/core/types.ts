@@ -6,6 +6,7 @@
 export type CourtStatus = "active" | "stopped";
 export type MatchState = "in_progress" | "finished" | "cancelled";
 export type CancelReason = "rollback" | "manual_clear";
+export type MatchType = "regular" | "request";
 export type EntryStatus = "active" | "paused" | "withdrawn";
 export type OutcomeType = "normal" | "retired" | "walkover" | "abandoned";
 export type MovementReason =
@@ -39,14 +40,24 @@ export interface QueueEntry {
   queuePosition: number;
 }
 
+/** 試合自動生成時のピック結果 */
+export interface PickedMatch {
+  entryA: string;
+  entryB: string;
+  entryAOriginalQueuePosition: number;
+  entryBOriginalQueuePosition: number;
+  remainingQueue: QueueEntry[];
+}
+
 /** 試合情報 */
 export interface MatchInfo {
   matchId: string;
-  courtNo: number;
+  courtNo: number | null;
   entryAId: string;
   entryBId: string;
   state: MatchState;
   cancelReason: CancelReason | null;
+  matchType: MatchType;
 }
 
 /** 移動計算結果 */

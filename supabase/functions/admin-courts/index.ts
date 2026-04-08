@@ -432,7 +432,8 @@ async function tryAutoGenerateMatch(
     .select("*", { count: "exact", head: true })
     .eq("tournament_id", tournamentId)
     .eq("court_no", courtNo)
-    .eq("state", "in_progress");
+    .eq("state", "in_progress")
+    .eq("match_type", "regular");
 
   const { data: queue } = await db
     .from("queue_items")
@@ -460,7 +461,21 @@ async function tryAutoGenerateMatch(
     entryId: q.entry_id,
     queuePosition: q.queue_position,
   }));
-  const { entryA, entryB } = pickMatchEntries(queueEntries);
+  const {
+    entryA,
+    entryB,
+    entryAOriginalQueuePosition,
+    entryBOriginalQueuePosition,
+  } = pickMatchEntries(queueEntries);
+
+  // ピック対象が既に別の in_progress 試合に入っていないか確認（リクエスト試合含む）
+  const { count: pickedInProgress } = await db
+    .from("matches")
+    .select("*", { count: "exact", head: true })
+    .eq("tournament_id", tournamentId)
+    .eq("state", "in_progress")
+    .or(`entry_a_id.in.(${entryA},${entryB}),entry_b_id.in.(${entryA},${entryB})`);
+  if ((pickedInProgress || 0) > 0) return;
 
   // スナップショット作成
   const snapshotA = await buildSnapshot(db, entryA);
@@ -469,10 +484,13 @@ async function tryAutoGenerateMatch(
   const { data: newMatch } = await db.from("matches").insert({
     tournament_id: tournamentId,
     court_no: courtNo,
+    match_type: "regular",
     entry_a_id: entryA,
     entry_b_id: entryB,
     entry_a_snapshot: snapshotA,
     entry_b_snapshot: snapshotB,
+    entry_a_original_queue_position: entryAOriginalQueuePosition,
+    entry_b_original_queue_position: entryBOriginalQueuePosition,
   }).select().single();
 
   if (newMatch) {
