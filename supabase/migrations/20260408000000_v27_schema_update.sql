@@ -2,7 +2,7 @@
 -- match_type, entry_a_original_queue_position, entry_b_original_queue_position を matches に追加
 
 -- match_type: 'regular'(自動生成) or 'request'(管理者手動作成)
-ALTER TABLE matches ADD COLUMN IF NOT EXISTS match_type TEXT NOT NULL DEFAULT 'regular';
+ALTER TABLE matches ADD COLUMN match_type TEXT NOT NULL DEFAULT 'regular';
 ALTER TABLE matches ADD CONSTRAINT chk_match_type CHECK (match_type IN ('regular', 'request'));
 
 -- court_no の NOT NULL 制約を解除（リクエスト試合は court_no = null を許可）
@@ -20,8 +20,8 @@ ALTER TABLE matches ADD CONSTRAINT fk_matches_court
 ALTER TABLE matches ADD CONSTRAINT chk_match_type_court_no CHECK (match_type = 'request' OR court_no IS NOT NULL);
 
 -- ロールバック時に元の待機列位置に復元するための記録
-ALTER TABLE matches ADD COLUMN IF NOT EXISTS entry_a_original_queue_position INTEGER;
-ALTER TABLE matches ADD COLUMN IF NOT EXISTS entry_b_original_queue_position INTEGER;
+ALTER TABLE matches ADD COLUMN entry_a_original_queue_position INTEGER;
+ALTER TABLE matches ADD COLUMN entry_b_original_queue_position INTEGER;
 
 -- in_progress の一意制約を match_type = 'regular' に限定（リクエスト試合は同一コートに複数可）
 -- 既存の partial unique index を削除して再作成
