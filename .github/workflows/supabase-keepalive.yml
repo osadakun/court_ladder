@@ -1,0 +1,64 @@
+name: Supabase Keepalive
+
+# Supabase Free プランは、直近 1 週間の DB アクティビティが少ないと
+# プロジェクトが Pause される可能性がある。
+# 毎日数回、軽量な REST リクエストを投げて DB アクティビティを維持する。
+#
+# Required GitHub Secrets:
+#   - SUPABASE_URL       例: https://igowvccfhpnraoxmlvhp.supabase.co
+#   - SUPABASE_ANON_KEY  フロントエンドで使っている anon key (frontend/.env.local の VITE_SUPABASE_ANON_KEY 相当)
+
+on:
+  schedule:
+    # 毎日 3 回。GitHub Actions が混雑しやすい毎時 00 分を避ける。
+    - cron: '17 2,10,18 * * *'
+  workflow_dispatch: # 手動実行用
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ping Supabase Database
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          set -euo pipefail
+          : "${SUPABASE_URL:?SUPABASE_URL secret is not set}"
+          : "${SUPABASE_ANON_KEY:?SUPABASE_ANON_KEY secret is not set}"
+
+          curl -fsS -X POST \
+            --retry 5 \
+            --retry-all-errors \
+            --retry-delay 10 \
+            --retry-max-time 120 \
+            --connect-timeout 15 \
+            --max-time 30 \
+            -H "apikey: ${SUPABASE_ANON_KEY}" \
+            -H "Authorization: Bearer ${SUPABASE_ANON_KEY}" \
+            -H "Content-Type: application/json" \
+            -d '{}' \
+            "${SUPABASE_URL}/rest/v1/rpc/keepalive_ping" \
+            -o /dev/null
+          echo "Supabase database ping: ok"
+
+      - name: Ping Edge Function (warm)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        run: |
+          set -euo pipefail
+          : "${SUPABASE_URL:?SUPABASE_URL secret is not set}"
+
+          # 軽量に OPTIONS で叩く (CORS preflight)。失敗しても致命ではないので || true
+          curl -fsS -X OPTIONS \
+            --retry 2 \
+            --retry-all-errors \
+            --retry-delay 5 \
+            --connect-timeout 15 \
+            --max-time 30 \
+            -H "Origin: https://example.com" \
+            -H "Access-Control-Request-Method: POST" \
+            "${SUPABASE_URL}/functions/v1/public-api" \
+            -o /dev/null || true
+          echo "Edge function ping: done"
